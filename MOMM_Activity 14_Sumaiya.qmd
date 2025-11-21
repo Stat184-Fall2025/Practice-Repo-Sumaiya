@@ -1,0 +1,473 @@
+---
+title: "Mini Open Methods Memo (Activity #14)"
+author: "Sumaiya Azad"
+date: "2025-10-20"
+format:
+  pdf:
+    toc: false
+    number-sections: true
+    geometry: margin=1in
+    fig-cap-location: top
+    tbl-cap-location: top
+    
+execute:
+  echo: false
+  message: false
+  warning: false
+---
+
+```{r setup}
+# ---- Setup & packages -------------------------------------------------
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(janitor)
+library(knitr)
+library(kableExtra)
+library(dcData)
+library(ggplot2)
+
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+# Introduction
+
+This memo brings together several key activities from the course into one
+reproducible document. I revisit data wrangling with the Armed Forces data,
+extend my baby names visualization, and return to the Box Problem from early in
+the semester. I end with a brief reflection on what I feel I have learned so
+far. All of the code used to generate the results in this document is collected
+in a Code Appendix at the end.
+
+# Armed Forces Data Wrangling 
+
+In Activities #08 and #10, we used the Armed Forces data set to practice data
+wrangling and create frequency tables. Here I present a revised and fully
+reproducible version of that work. Instead of reading a local Excel file, I read
+directly from a Google Sheets URL so that the code can run on someone else's
+computer without modification.
+
+For this memo, I focus on a narrower sub-set of soldiers:
+
+- **Sex:** Female soldiers only  
+- **Branches:** All branches represented in the table  
+- **Case:** Each row in the expanded data set represents an individual soldier  
+
+The original Excel file has multiple header rows with merged cells. I reconstruct
+the header by filling in missing branch names and combining branch and sex labels
+into meaningful column names. I then pivot the data into a tidy format, convert
+counts to numeric values, and use `uncount()` to expand the table so that each
+row corresponds to an individual soldier. Finally, I create a two-way frequency
+table of **branch by rank** for female soldiers, with both counts and percentages.
+
+```{r armed-forces-table}
+# ---- Armed Forces: wrangle & frequency table (female soldiers) --------
+
+# Download & read Excel from Google Sheets 
+sheet_url <- "https://docs.google.com/spreadsheets/d/1cn4i0-ymB1ZytWXCwsJiq6fZ9PhGLUvbMBHlzqG4bwo/export?format=xlsx&gid=597536282"
+temp_xlsx <- tempfile(fileext = ".xlsx")
+download.file(sheet_url, destfile = temp_xlsx, mode = "wb")
+
+# Read Excel with no column headers
+df_raw <- read_excel(temp_xlsx, col_names = FALSE)
+
+# Convert header rows into character vectors
+header1 <- as.character(unlist(df_raw[2, ]))  
+header2 <- as.character(unlist(df_raw[3, ]))  
+
+# Fill branch names across merged cells
+last_branch <- NA_character_
+for (i in seq_along(header1)) {
+  if (!is.na(header1[i]) && nzchar(header1[i])) {
+    last_branch <- header1[i]
+  } else {
+    header1[i] <- last_branch
+  }
+}
+
+# Combine into "Branch Sex"
+col_names <- ifelse(
+  is.na(header2) | !nzchar(header2),
+  header1,
+  paste(header1, header2)
+)
+
+# Remove header rows and rename first column to pay_grade
+data_clean <- df_raw[-c(1:3), ]
+colnames(data_clean) <- col_names
+colnames(data_clean)[1] <- "pay_grade"
+
+# Pivot into tidy format and clean up
+Armed_Forces <- data_clean |>
+  pivot_longer(
+    cols      = -pay_grade,
+    names_to  = c("branch", "sex"),
+    names_sep = " ",
+    values_to = "count"
+  ) |>
+  filter(!is.na(count)) |>
+  mutate(branch = trimws(branch)) |>
+  filter(sex != "Total") |>
+  mutate(count = as.numeric(count)) |>
+  filter(!is.na(count))
+
+# Expand to individual soldiers and rename pay_grade to rank
+Armed_Forces_Individuals <- Armed_Forces |>
+  uncount(weights = count, .remove = FALSE) |>
+  mutate(soldier_id = dplyr::row_number()) |>
+  select(soldier_id, pay_grade, branch, sex) |>
+  rename(rank = pay_grade)
+
+# Create formatted tables by sex
+make_table <- function(data, sex_label) {
+  data |>
+    filter(sex == sex_label) |>
+    tabyl(branch, rank) |>
+    adorn_totals(where = c("row", "col")) |>
+    adorn_percentages("all") |>
+    adorn_pct_formatting(digits = 1) |>
+    adorn_ns(position = "front") |>
+    kbl(
+      caption = paste(sex_label, "soldiers by branch and rank"),
+      align   = "c",
+      booktabs = TRUE
+    ) |>
+    kable_styling(
+      position      = "center",
+      latex_options = c("hold_position", "scale_down")
+    )
+}
+
+female_table <- make_table(Armed_Forces_Individuals, "Female")
+
+female_table
+```
+
+Table 1 summarizes the distribution of **female soldiers** by branch and rank.
+Each cell contains the number of soldiers and the corresponding overall
+percentage. The totals row and column provide convenient summaries across all
+branches and all ranks. We can see that some branches have a higher number of
+female soldiers overall, and within those branches certain ranks are more common
+than others. This suggests that the relationship between branch and rank is not
+uniform even within the female sub-group, and the table helps identify which
+branch–rank combinations are most prevalent.
+
+# Popularity of Baby Names over the Years
+
+The `BabyNames` data set from the `dcData` package contains counts of how many
+babies received each name by year and sex in the United States. For this memo I
+chose to highlight the **top three female names** and **top three male names**
+based on total counts across all available years.
+
+I first identify the top three names for each sex, then create a data set that
+contains only those names. In the plot, I distinguish sexes using **line type**:
+dashed lines for girls and solid lines for boys. Using both color and line type
+helps make the figure more accessible.
+
+```{r baby-names-plot, fig.cap="Figure 1. Popularity of the top three girl and boy names in the U.S. over time.", fig.alt="A time series line chart showing yearly counts of babies with the top three girl names and the top three boy names in the U.S. Each name is shown as a colored line; dashed lines represent girls and solid lines represent boys."}
+# ---- Popular Baby Names: top 3 girl & boy names -----------------------
+
+data("BabyNames")
+
+# Top 3 female names by total count
+top_female <- BabyNames |>
+  filter(sex == "F") |>
+  group_by(name) |>
+  summarise(total = sum(count, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total)) |>
+  slice_head(n = 3) |>
+  pull(name)
+
+# Top 3 male names by total count
+top_male <- BabyNames |>
+  filter(sex == "M") |>
+  group_by(name) |>
+  summarise(total = sum(count, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total)) |>
+  slice_head(n = 3) |>
+  pull(name)
+
+# Data for the selected names
+baby_data <- BabyNames |>
+  filter(name %in% c(top_female, top_male)) |>
+  mutate(line_type = ifelse(sex == "F", "dashed", "solid"))
+
+# Create visualization
+ggplot(
+  data    = baby_data,
+  mapping = aes(
+    x        = year,
+    y        = count,
+    colour   = name,
+    linetype = line_type
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  scale_linetype_identity() +
+  labs(
+    title    = "Popularity of Top 3 Girl and Boy Names in the U.S. Over Time",
+    subtitle = "Dashed lines represent girls; solid lines represent boys",
+    x        = "Year",
+    y        = "Number of Babies with Name",
+    colour   = "Name",
+    caption  = "Source: dcData::BabyNames dataset (U.S. Social Security Administration)"
+  ) +
+  theme_minimal()
+```
+
+Figure 1 shows how the popularity of the top names for girls and boys changes
+over time. Some names dominate early decades and then decline, while others
+become more popular only in recent years. The dashed versus solid line types
+make it easy to see differences between female and male usage. I chose to use
+the top three names for each sex because they provide clear trends in the data
+and highlight how naming patterns evolve across the years.
+
+# Plotting a Mathematical Function: The Box Problem
+
+In the Box Problem from Activity #04, we start with a rectangular piece of
+paper, cut out equal squares of side length \(x\) from each corner, and fold up
+the resulting flaps to form an open-top box. If the original sheet has length
+\(L\) and width \(W\), then the volume of the resulting box is
+
+\[
+V(x) = x \times (L - 2x) \times (W - 2x).
+\]
+
+For this memo I use a sheet that is **36 inches by 48 inches**, taking
+\(L = 48\) inches and \(W = 36\) inches. The function below implements this
+formula, and I use `{ggplot2}` with `stat_function()` to plot the volume as a
+function of the cut size \(x\).
+
+```{r box-plot, fig.cap="Figure 2. Volume of an open-top box made from a 36 by 48 inch sheet as a function of cut size.", fig.alt="A smooth curve showing the volume of an open-top box constructed from a 36 by 48 inch sheet as the corner cut size increases from 0 to 18 inches. The curve starts at zero, rises to a single peak at a mid-range cut size, then decreases back toward zero."}
+# ---- Box Problem: function & stat_function plot ----------------------
+
+# Volume function for a sheet with length = 48 in and width = 36 in
+volume_box <- function(x, length_in = 48, width_in = 36) {
+  x * (length_in - 2 * x) * (width_in - 2 * x)
+}
+
+# Domain for x: from 0 up to half of the smaller side (36 / 2 = 18)
+box_domain <- data.frame(
+  x = c(0, 18)
+)
+
+# Create visualization 
+ggplot(
+  data    = box_domain,
+  mapping = aes(x = x)
+) +
+  stat_function(
+    fun = volume_box,
+    n   = 501
+  ) +
+  labs(
+    title = "Volume of the Box vs. Cut Size",
+    x     = "Cut size x (inches)",
+    y     = "Volume V(x) (cubic inches)"
+  ) +
+  theme_minimal()
+```
+
+Figure 2 shows that the volume starts at zero when \(x = 0\), increases to a
+single peak, and then decreases back toward zero as the cut size becomes too
+large. This pattern reflects the trade-off between increasing the height of the
+box (with larger cuts) and shrinking the base dimensions
+\((L - 2x)\) and \((W - 2x)\). The maximum volume occurs at an intermediate cut
+size (approximately 6–7 inches), which yields a volume of around
+5,000–5,300 cubic inches. In words, cutting out squares of about 6–7 inches from
+each corner of the 36 by 48 inch sheet produces the box with the largest
+possible volume.
+
+# What I Feel I’ve Learned So Far
+
+So far in this course I feel that I have:
+
+- **Learned how to write reproducible code** that can be run on someone else’s
+  computer. Moving my Armed Forces wrangling code away from a local file path
+  and reading directly from a shared Google Sheet was a concrete step toward
+  reproducibility.
+- **Strengthened my data wrangling skills**, especially with `pivot_longer()`,
+  `filter()`, and the `{janitor}` functions such as `tabyl()` and
+  `adorn_*()`. Working through the messy Armed Forces headers made me more
+  comfortable with real-world, imperfect data.
+- **Improved my visualization practice** by using `{ggplot2}` and thinking about
+  effective graphics. In the baby names plot, I used line type in addition to
+  color to distinguish sexes, which helps with accessibility and avoids relying
+  on color alone.
+
+Overall, I feel much more comfortable with R syntax and with the full data 
+analysis cycle. The Plan–Code–Improve–Polish framework has helped me structure 
+my workflow more intentionally. Over time I have gradually gained more 
+confidence in my data wrangling and visualization skills, and I’m working 
+towards becoming more familiar with producing and publishing reproducible work.
+
+# Code Appendix
+
+All R code used to generate the tables and figures in this document is collected
+here.
+
+```{r code-appendix, echo=TRUE, eval=FALSE}
+# ---- Setup & packages -------------------------------------------------
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(janitor)
+library(knitr)
+library(kableExtra)
+library(dcData)
+library(ggplot2)
+
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+
+# ---- Armed Forces: wrangle & frequency table (female soldiers) --------
+
+sheet_url <- "https://docs.google.com/spreadsheets/d/1cn4i0-ymB1ZytWXCwsJiq6fZ9P
+hGLUvbMBHlzqG4bwo/export?format=xlsx&gid=597536282"
+temp_xlsx <- tempfile(fileext = ".xlsx")
+download.file(sheet_url, destfile = temp_xlsx, mode = "wb")
+
+df_raw <- read_excel(temp_xlsx, col_names = FALSE)
+
+header1 <- as.character(unlist(df_raw[2, ]))
+header2 <- as.character(unlist(df_raw[3, ]))
+
+last_branch <- NA_character_
+for (i in seq_along(header1)) {
+  if (!is.na(header1[i]) && nzchar(header1[i])) {
+    last_branch <- header1[i]
+  } else {
+    header1[i] <- last_branch
+  }
+}
+
+col_names <- ifelse(
+  is.na(header2) | !nzchar(header2),
+  header1,
+  paste(header1, header2)
+)
+
+data_clean <- df_raw[-c(1:3), ]
+colnames(data_clean) <- col_names
+colnames(data_clean)[1] <- "pay_grade"
+
+Armed_Forces <- data_clean |>
+  pivot_longer(
+    cols      = -pay_grade,
+    names_to  = c("branch", "sex"),
+    names_sep = " ",
+    values_to = "count"
+  ) |>
+  filter(!is.na(count)) |>
+  mutate(branch = trimws(branch)) |>
+  filter(sex != "Total") |>
+  mutate(count = as.numeric(count)) |>
+  filter(!is.na(count))
+
+Armed_Forces_Individuals <- Armed_Forces |>
+  uncount(weights = count, .remove = FALSE) |>
+  mutate(soldier_id = dplyr::row_number()) |>
+  select(soldier_id, pay_grade, branch, sex) |>
+  rename(rank = pay_grade)
+
+make_table <- function(data, sex_label) {
+  data |>
+    filter(sex == sex_label) |>
+    tabyl(branch, rank) |>
+    adorn_totals(where = c("row", "col")) |>
+    adorn_percentages("all") |>
+    adorn_pct_formatting(digits = 1) |>
+    adorn_ns(position = "front") |>
+    kbl(
+      caption = paste(sex_label, "soldiers by branch and rank"),
+      align   = "c",
+      booktabs = TRUE
+    ) |>
+    kable_styling(
+      position      = "center",
+      latex_options = c("hold_position", "scale_down")
+    )
+}
+
+female_table <- make_table(Armed_Forces_Individuals, "Female")
+
+# ---- Popular Baby Names: top 3 girl & boy names -----------------------
+
+data("BabyNames")
+
+top_female <- BabyNames |>
+  filter(sex == "F") |>
+  group_by(name) |>
+  summarise(total = sum(count, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total)) |>
+  slice_head(n = 3) |>
+  pull(name)
+
+top_male <- BabyNames |>
+  filter(sex == "M") |>
+  group_by(name) |>
+  summarise(total = sum(count, na.rm = TRUE), .groups = "drop") |>
+  arrange(desc(total)) |>
+  slice_head(n = 3) |>
+  pull(name)
+
+baby_data <- BabyNames |>
+  filter(name %in% c(top_female, top_male)) |>
+  mutate(line_type = ifelse(sex == "F", "dashed", "solid"))
+
+ggplot(
+  data    = baby_data,
+  mapping = aes(
+    x        = year,
+    y        = count,
+    colour   = name,
+    linetype = line_type
+  )
+) +
+  geom_line(linewidth = 0.9) +
+  scale_linetype_identity() +
+  labs(
+    title    = "Popularity of Top 3 Girl and Boy Names in the U.S. Over Time",
+    subtitle = "Dashed lines represent girls; solid lines represent boys",
+    x        = "Year",
+    y        = "Number of Babies with Name",
+    colour   = "Name",
+    caption  = "Source: dcData::BabyNames dataset (U.S. Social Security 
+    Administration)"
+  ) +
+  theme_minimal()
+
+# ---- Box Problem: function & stat_function plot ----------------------
+
+volume_box <- function(x, length_in = 48, width_in = 36) {
+  x * (length_in - 2 * x) * (width_in - 2 * x)
+}
+
+box_domain <- data.frame(
+  x = c(0, 18)
+)
+
+ggplot(
+  data    = box_domain,
+  mapping = aes(x = x)
+) +
+  stat_function(
+    fun = volume_box,
+    n   = 501
+  ) +
+  labs(
+    title = "Volume of the Box vs. Cut Size",
+    x     = "Cut size x (inches)",
+    y     = "Volume V(x) (cubic inches)"
+  ) +
+  theme_minimal()
+```
